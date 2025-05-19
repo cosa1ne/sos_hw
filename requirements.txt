@@ -1,0 +1,4 @@
+aiohttp
+websockets
+serial_asyncio
+python-escpos
