@@ -1,7 +1,7 @@
 import asyncio, signal
-from server_client import ServerClient
-from serial_bridge  from serial_bridge import SerialBridge
-from printer        import print_receipt
+from sent_of_sound.server_client import ServerClient
+from serial_bridge import SerialBridge
+from printer import print_receipt
 
 RECIPE_Q = asyncio.Queue()
 ACK_Q    = asyncio.Queue()
