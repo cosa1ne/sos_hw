@@ -1,4 +1,6 @@
-aiohttp
-websockets
-serial_asyncio
+fastapi
+uvicorn
+httpx
+pillow
+pyserial
 python-escpos
