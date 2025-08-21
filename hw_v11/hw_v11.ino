@@ -14,8 +14,8 @@
 #include <DHT.h>
 
 /* ===== 컴파일 타임 토글 ===== */
-#define ENABLE_TEST_INPUT 1   // 1=테스트 입력 허용, 0=무시
-#define DEBUG_MODE 1          // 1=DHT22 온도 시리얼 출력 활성화, 0=비활성화
+#define ENABLE_TEST_INPUT 0   // 1=테스트 입력 허용, 0=무시
+#define DEBUG_MODE 0          // 1=DHT22 온도 시리얼 출력 활성화, 0=비활성화
 
 /* ───── 핀 매핑 ───── */
 // 시향 SG90 서보
