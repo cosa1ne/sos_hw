@@ -21,14 +21,19 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ───── 사용자-환경 설정 ─────────────────────────────────────────
 SERIAL_PORT, BAUD_RATE = "/dev/ttyACM0", 115200
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "img"
-TIME_DIR = TEMPLATE_DIR / "time"; TIME_DIR.mkdir(parents=True, exist_ok=True)
+ORIG_DIR   = TEMPLATE_DIR / "original"
+CUSTOM_DIR = TEMPLATE_DIR / "custom"
+TIME_DIR   = TEMPLATE_DIR / "time"
+for _d in (ORIG_DIR, CUSTOM_DIR, TIME_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
 KEEP_IMAGES = 10
 
 USB_VID, USB_PID = 0x0FE6, 0x811E
@@ -48,8 +53,19 @@ VALID_QR = {"배롱나무","감나무","은행나무","경포대","차수국",
             "태백산맥","밤장미","벚꽃","안목해변","소나무"}
 QR_PAT = re.compile(r"^[\u3131-\uD79D\w ]+$")
 QR_RET_SEC, PHYSICAL_ID = 3, "MPQ03KH/A"
-PUMP_MAP = {"배롱나무":0,"감나무":1,"은행나무":2,"경포대":3,"차수국":4,
-            "태백산맥":5,"밤장미":6,"벚꽃":7,"안목해변":8,"소나무":9}
+
+# --- 워터펌프 관련 파라미터 ------------------------------------#
+PUMP_MAP = {
+    "오미자": 0, "감나무": 1, "은행나무": 2, "경포대": 3, "차수국": 4,
+    "태백산맥": 5, "메밀꽃": 6, "감자꽃": 7, "안목해변": 8, "소나무": 9
+}
+
+NAME_SET = set(PUMP_MAP.keys())  # ← name 판별용 (JSON과 직접 비교)
+
+ALLOWED_MIN_ML = 14.0
+ALLOWED_MAX_ML = 15.1
+MIN_ING = 1
+MAX_ING = 7
 
 ser_lock = threading.Lock()
 serial_ready = threading.Event()
@@ -61,9 +77,39 @@ current_production_id: str | None = None
 last_qr_sent: dict[str, float] = {}
 
 # ───── 템플릿 찾기 ───────────────────────────────────────
-def find_template(n):
+'''def find_template(n):
     p = TEMPLATE_DIR / f"{n}.png"
-    return p if p.exists() else None
+    return p if p.exists() else None'''
+def _count_used_ingredients(recipe: Dict[str, float]) -> int:
+     # 커스텀 요청은 0 ml가 안 오므로 길이로 결정
+     n = len(recipe)
+     if n < 1: n = 1
+     if n > 7: n = 7
+     return n
+
+def select_template(name: str, recipe: Dict[str, float]) -> Optional[Path]:
+    """
+    name이 10개 고정 향료 집합에 포함되면: img/original/<name>.png
+    아니면: img/custom/<N>.png (N = len(recipe), 1~7)
+    """
+    clean = name.replace(" ", "")
+    if name in NAME_SET:
+        p = ORIG_DIR / f"{clean}.png"
+        if p.exists():
+            print(f"[TPL] original 선택: {p}")
+            return p
+        print(f"[TPL] original 지정이나 파일 없음: {p}")
+        return None
+    else:
+        n = _count_used_ingredients(recipe)
+        p = CUSTOM_DIR / f"{n}.png"
+        if p.exists():
+            print(f"[TPL] custom 선택: {p} (N={n})")
+            return p
+        print(f"[TPL] custom 파일 없음: {p}")
+        return None
+
+
 
 # ───── 프린터 헬퍼 ────────────────────────────────────────────
 '''def printer_ready() -> bool:
@@ -149,7 +195,7 @@ def handle_qr(qr: str) -> None:
         print("[QR] 예외:", e)
 
 # ───── FastAPI 및 시리얼 초기화 ───────────────────────────────
-app = FastAPI()
+app = FastAPI(title="Scenti Piano - production API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 main_loop = asyncio.get_event_loop()
 try:
@@ -159,33 +205,22 @@ except serial.SerialException as e:
     print("⚠️ Serial open 실패:", e)
     ser = None
 
-# ─── Pydantic 모델 ──────────────────────────────────────────
-class CustomRecipe(BaseModel):
-    top: Optional[List[Dict[str, float]]] = []
-    middle: Optional[List[Dict[str, float]]] = []
-    base: Optional[List[Dict[str, float]]] = []
-class CustomRequest(BaseModel):
-    name: str
-    recipe: CustomRecipe
-    callbackUrl: str
-    productionId: Optional[str] = None
-class OriginalRecipe(BaseModel):
-    name: str
-    ratio: float
-class OriginalRequest(BaseModel):
-    recipe: OriginalRecipe
-    callbackUrl: str
-    productionId: Optional[str] = None
 
-def parse_recipe(recipe: dict, total: float = 15.0) -> List[float]:
-    v = [0.0] * 10
-    for layer in ("top", "middle", "base"):
-        for itm in recipe.get(layer, []):
-            for n, p in itm.items():
-                idx = PUMP_MAP.get(n)
-                if idx is not None: v[idx] += total * (p / 100.0)
-    return v
-fmt = lambda vs: [f"{x:.1f}" if x == int(x) else f"{x:.2f}".rstrip("0") for x in vs]
+def _fmt(vs: List[float]) -> List[str]:
+    out = []
+    for x in vs:
+        if float(int(x)) == float(x):
+            out.append(f"{x:.1f}")
+        else:
+            s = f"{x:.2f}".rstrip("0")
+            out.append(s if "." in s else s + ".0")
+    return out
+
+class PerfumeRequest(BaseModel):
+    name: str = Field(..., description="향수 이름")
+    recipe: Dict[str, float] = Field(..., description="향료명→ml (절대량)")
+    callbackUrl: str
+    productionId: str
 
 
 # ───── 시리얼 워커/처리자 ──────────────────────────────────────
@@ -258,7 +293,7 @@ def serial_done_worker():
         #제조 완료 콜백
         print("[DBG] 콜백 URL : ", current_callback_url, "PID: ", current_production_id)
         if current_callback_url and current_production_id:
-            handle_production_done("http://3.39.64.81:8080/api/v1/hardware/callback", current_production_id, success=True)
+            handle_production_done(current_callback_url, current_production_id, success=True)
         else:
             print("[DEG] 콜백 미존재, 실행 안함")
     except Exception as e:
@@ -275,49 +310,122 @@ def serial_done_worker():
 # ─── FastAPI 이벤트 및 라우터 ──────────────────────────────
 @app.on_event("startup")
 def _start():
+    print("[STARTUP] FastAPI 서버 시작")
     if ser:
+        print("[STARTUP] Serial 워커 스레드 시작")
         threading.Thread(target=serial_worker, daemon=True).start()
+    else:
+        print("[STARTUP] Serial 포트 없음, 워커 미시작")
 
 @app.get("/")
 def root():
-    return {"message": "FastAPI is running!"}
+    return {"message": "production API is running"}
 
 @app.post("/api/production")
-async def production(req: Request):
-    global current_template, current_callback_url, current_production_id
-    try:
-        body = await req.json(); print("[REQ]", body)
-        # --- Custom
-        if "name" in body and "recipe" in body:
-            data = CustomRequest(**body)
-            fname = data.name.replace(" ", "")
-            pumps = parse_recipe(data.recipe.dict())
-            cid = data.productionId or f"{fname}_{datetime.now():%Y%m%d%H%M%S}"
-            cb_url = data.callbackUrl
-        # --- Original
-        elif "recipe" in body and "name" in body["recipe"]:
-            data = OriginalRequest(**body)
-            fname = data.recipe.name.replace(" ", "")
-            pumps = parse_recipe({"base": [{data.recipe.name: data.recipe.ratio}]})
-            cid = data.productionId or f"{fname}_{datetime.now():%Y%m%d%H%M%S}"
-            cb_url = data.callbackUrl
-        else:
-            return JSONResponse(400, {"status": "error", "code": "INVALID_FORMAT", "message": "지원되지 않는 형식"})
+def production(req: PerfumeRequest):
 
-        tpl = find_template(fname)
-        current_template = tpl
-        current_callback_url = cb_url
-        current_production_id = cid
+    print("==== /api/production 호출됨 ====")
+    print("req.name =", req.name)
+    print("req.recipe =", req.recipe)
+    print("req.callbackUrl =", req.callbackUrl)
+    print("req.productionId =", req.productionId)
 
-        if ser and ser.is_open:
-            s = ",".join(fmt(pumps))
+    # 0) 키/값 기초 검증
+    print(req)
+    if not isinstance(req.recipe, dict) or len(req.recipe) == 0:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "recipe는 최소 1개 이상의 항목이 필요합니다."},
+        )
+
+    # 1) 알 수 없는 향료명 검증 (엄격 모드: 있으면 에러)
+    unknowns = [k for k in req.recipe.keys() if k not in PUMP_MAP]
+    if unknowns:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "정의되지 않은 향료명이 포함되어 있습니다.",
+                "details": {"unknown_ingredients": unknowns}
+            },
+        )
+
+    # 2) 개수 제한 (1~7개) — 커스텀은 0ml가 안 오므로 len(recipe) 그대로 사용
+    if not (MIN_ING <= len(req.recipe) <= MAX_ING):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": f"향료 개수는 {MIN_ING}~{MAX_ING}개여야 합니다.",
+                "details": {"count": len(req.recipe)}
+            },
+        )
+
+    # 3) 값 검증 및 총합 계산 (음수/NaN/None 금지)
+    total = 0.0
+    pumps = [0.0] * 10
+    for name, ml in req.recipe.items():
+        try:
+            val = float(ml)
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": f"'{name}'의 값이 숫자가 아닙니다."},
+            )
+        if val < 0:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": f"'{name}'의 양은 음수가 될 수 없습니다."},
+            )
+        pumps[PUMP_MAP[name]] += val
+        total += val
+
+    # 4) 총합 제한 (14.0~15.1 ml)
+    if not (ALLOWED_MIN_ML <= total <= ALLOWED_MAX_ML):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": f"총합은 {ALLOWED_MIN_ML}~{ALLOWED_MAX_ML} ml 범위여야 합니다.",
+                "details": {"total_ml": round(total, 3)}
+            },
+        )
+
+    # 5) 템플릿/콜백/프로덕션ID/향수명 세팅 (영수증/콜백에 필요)
+    global current_template, current_callback_url, current_production_id, current_perfume_name
+    current_template = select_template(req.name, req.recipe)
+    current_callback_url = req.callbackUrl
+    current_production_id = req.productionId
+    current_perfume_name = req.name
+
+    # 6) 아두이노 전송 (개행 포함)
+    payload = ",".join(_fmt(pumps))
+    line = payload + "\n"
+    print("[REQ] name:", req.name)
+    print("[REQ] productionId:", req.productionId)
+    print("[REQ] callbackUrl:", req.callbackUrl)
+    print(f"[REQ] recipe_count={len(req.recipe)}, total_ml={total:.3f}")
+    print("[SER 준비] payload =", payload)
+
+    if ser is None:
+        print("[SER] ser is None")
+    elif not ser.is_open:
+        print("[SER] ser is not open")
+    else:
+        try:
             with ser_lock:
-                ser.write((s + "\n").encode())
-            print("[SER] →", s)
+                ser.write(line.encode())  # ← 개행 포함해 인코딩
+            print("[SER 전송 완료]", payload)
+        except Exception as e:
+            print("[SER] 전송 실패]", e)
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": "아두이노 통신 실패"},
+            )
 
-        return {"status": "success", "message": "향수 제작 요청이 수락되었습니다",
-                "details": {"production_id": cid}}
-    except Exception as e:
-        print("[ERR] production:", e)
-
-        
+    # 7) 성공 응답
+    return {
+        "status": "success",
+        "message": "향수 제작 요청이 수락되었습니다",
+        "details": {"production_id": req.productionId}
+    }
